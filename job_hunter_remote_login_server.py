@@ -166,7 +166,30 @@ def browser_worker(s: BrowserSession):
                 is_mobile=True,
             )
             page = context.new_page()
-            page.goto(PLATFORMS[s.platform]["url"], wait_until="domcontentloaded", timeout=60000)
+
+            # jobinja.ir (ArvanCloud WAF) intermittently aborts the TLS
+            # handshake (~20-30% of attempts), so retry before giving up.
+            goto_error = None
+            for attempt in range(4):
+                try:
+                    page.goto(
+                        PLATFORMS[s.platform]["url"],
+                        wait_until="domcontentloaded",
+                        timeout=60000,
+                    )
+                    goto_error = None
+                    break
+                except Exception as exc:
+                    goto_error = exc
+                    print(
+                        f"[RemoteLogin] page load attempt {attempt + 1}/4 failed "
+                        f"for {s.platform}: {exc}"
+                    )
+                    if attempt < 3:
+                        time.sleep(1.5 * (attempt + 1))
+            if goto_error is not None:
+                raise goto_error
+
             page.wait_for_timeout(1200)
             s.status = "ready"
             s.ready.set()
