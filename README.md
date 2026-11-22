@@ -119,6 +119,12 @@ cp .env.example .env
 | `LOGIN_WEBAPP_URL` | for login button | Base URL of the remote-login mini-app, e.g. `https://xxxx.trycloudflare.com/login` |
 | `JOB_HUNTER_SESSION_DIR` | no | Where user session files live (default `resumes`) |
 | `TELEGRAM_INIT_DATA_MAX_AGE` | no | Max age in seconds for Telegram Mini-App init data (default `86400`) |
+| `JOB_HUNTER_SESSION_IDLE_TIMEOUT` | no | Seconds of inactivity before an open remote-login browser session is closed (default `600`) |
+
+> **Note:** quick tunnels (`*.trycloudflare.com`) get a **new URL every time
+> `cloudflared` restarts**, so buttons in old Telegram messages stop working.
+> Update `LOGIN_WEBAPP_URL`, restart the bot, and press 🔑 again to get a fresh
+> button.
 
 > `.env`, `resumes/<id>/*_state.json`, PDF resumes, and `data/*.db` are all
 > git-ignored. Never commit them: session files grant full account access.

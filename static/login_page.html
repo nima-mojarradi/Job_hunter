@@ -80,6 +80,7 @@ const screen = document.getElementById("screen");
 if (selectEl) selectEl.value = platform;
 
 let token = null, timer = null, busy = false, fetchingFrame = false;
+let streamMode = false;
 let activePointerId = null;
 let downClient = null;
 let lastCoords = null;
@@ -115,7 +116,7 @@ async function startBrowser() {
   platform = selectEl && ALLOWED.includes(selectEl.value) ? selectEl.value : "jobinja";
   updateHeading();
 
-  if (timer) { clearInterval(timer); timer = null; }
+  stopStream();
   token = null;
   busy = false;
   fetchingFrame = false;
@@ -123,7 +124,6 @@ async function startBrowser() {
   downClient = null;
   lastCoords = null;
   isDragging = false;
-  if (screen) screen.removeAttribute("src");
 
   if (connectBtn) {
     connectBtn.disabled = true;
@@ -135,8 +135,7 @@ async function startBrowser() {
     const data = await api("/api/auth/start", { platform, user_id: queryUserId || undefined });
     token = data.token;
     setStatus("مرورگر آماده است. ورود و CAPTCHA را در تصویر زیر انجام دهید.");
-    refreshImage();
-    timer = setInterval(refreshImage, 350);
+    startStream();
   } catch (err) {
     setStatus("خطا: " + (err && err.message ? err.message : String(err)));
   } finally {
@@ -147,8 +146,42 @@ async function startBrowser() {
   }
 }
 
+function streamUrl() {
+  return "/api/auth/" + encodeURIComponent(token) + "/stream?user_id=" + encodeURIComponent(queryUserId);
+}
+
+function startStream() {
+  if (!token || !screen) return;
+  if (queryUserId) {
+    streamMode = true;
+    screen.src = streamUrl();
+  } else {
+    // No user id in URL: the <img> tag cannot send auth headers, fall back to polling.
+    streamMode = false;
+    timer = setInterval(refreshImage, 350);
+  }
+}
+
+function stopStream() {
+  if (timer) { clearInterval(timer); timer = null; }
+  streamMode = false;
+  if (screen) screen.removeAttribute("src");
+}
+
+// If the live stream cannot load (browser without MJPEG support, dropped
+// connection), silently fall back to the old frame-by-frame polling.
+if (screen) {
+  screen.addEventListener("error", () => {
+    if (streamMode && token && !busy) {
+      streamMode = false;
+      setStatus("استریم قطع شد؛ حالت تصویری قدیمی فعال شد.");
+      timer = setInterval(refreshImage, 350);
+    }
+  });
+}
+
 function refreshImage() {
-  if (!token || busy || fetchingFrame || !screen) return;
+  if (!token || busy || fetchingFrame || !screen || streamMode) return;
   fetchingFrame = true;
   fetch("/api/auth/" + encodeURIComponent(token) + "/screen?t=" + Date.now(), {
     headers: buildHeaders()
@@ -242,7 +275,6 @@ if (screen) {
     if (wasDrag) {
       await sendAction({ type: "mouse_move", x: pt.x, y: pt.y });
       await sendAction({ type: "mouse_up", x: pt.x, y: pt.y });
-      setTimeout(refreshImage, 120);
     } else {
       await sendAction({ type: "mouse_up", x: pt.x, y: pt.y });
     }
@@ -265,7 +297,13 @@ document.getElementById("type")?.addEventListener("click", async () => {
   }
 });
 document.getElementById("enter")?.addEventListener("click", () => sendAction({ type: "key", key: "Enter" }));
-document.getElementById("refresh")?.addEventListener("click", refreshImage);
+document.getElementById("refresh")?.addEventListener("click", () => {
+  if (streamMode && token && queryUserId) {
+    screen.src = streamUrl() + "&t=" + Date.now();
+  } else {
+    refreshImage();
+  }
+});
 
 document.getElementById("complete")?.addEventListener("click", async () => {
   if (!token || busy) return;
@@ -274,9 +312,8 @@ document.getElementById("complete")?.addEventListener("click", async () => {
   setStatus("در حال ذخیره نشست...");
   try {
     const data = await api("/api/auth/" + encodeURIComponent(token) + "/complete", {});
-    clearInterval(timer);
+    stopStream();
     setStatus(data.message || "نشست ذخیره شد. به ربات برگردید و Start را دوباره بزنید.");
-    if (screen) screen.removeAttribute("src");
   } catch (err) {
     setStatus("خطای ذخیره نشست: " + err.message);
     busy = false;

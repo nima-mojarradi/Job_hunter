@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import hmac
 import json
@@ -12,7 +13,7 @@ from urllib.parse import parse_qsl
 
 import requests
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from playwright.sync_api import sync_playwright
 
@@ -21,6 +22,7 @@ app = FastAPI(title="Job Hunter Remote Login")
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 SESSION_ROOT = Path(os.getenv("JOB_HUNTER_SESSION_DIR", "resumes")).resolve()
 INIT_DATA_MAX_AGE = int(os.getenv("TELEGRAM_INIT_DATA_MAX_AGE", "86400"))
+SESSION_IDLE_TIMEOUT = int(os.getenv("JOB_HUNTER_SESSION_IDLE_TIMEOUT", "600"))
 
 PLATFORMS = {
     "jobinja": {
@@ -125,6 +127,7 @@ class BrowserSession:
     error: str | None = None
     status: str = "starting"
     thread: threading.Thread | None = None
+    last_activity: float = field(default_factory=time.monotonic)
 
 
 SESSIONS: dict[str, BrowserSession] = {}
@@ -171,12 +174,15 @@ def browser_worker(s: BrowserSession):
 
             last_capture = 0.0
             while not s.finished.is_set():
-                try:
-                    command = s.commands.get(timeout=0.05)
-                except queue.Empty:
-                    command = None
+                handled = False
+                while not s.finished.is_set():
+                    try:
+                        command = s.commands.get_nowait()
+                    except queue.Empty:
+                        break
 
-                if command:
+                    handled = True
+                    s.last_activity = time.monotonic()
                     kind = command.get("type")
                     try:
                         if kind == "mouse_down":
@@ -213,14 +219,24 @@ def browser_worker(s: BrowserSession):
                         s.error = str(exc)
 
                 now = time.monotonic()
-                if now - last_capture >= 0.25 and not s.finished.is_set():
+                if not s.finished.is_set() and (handled or now - last_capture >= 0.12):
                     try:
-                        shot = page.screenshot(type="jpeg", quality=60)
+                        shot = page.screenshot(type="jpeg", quality=45)
                         with s.lock:
                             s.screenshot = shot
                     except Exception as exc:
                         s.error = f"Screenshot error: {exc}"
-                    last_capture = now
+                    last_capture = time.monotonic()
+
+                if not handled:
+                    time.sleep(0.03)
+                    if time.monotonic() - s.last_activity > SESSION_IDLE_TIMEOUT:
+                        print(
+                            f"[RemoteLogin] Idle session closed "
+                            f"user={s.user_id} platform={s.platform}"
+                        )
+                        s.finished.set()
+                        break
 
     except Exception as exc:
         print(f"[RemoteLogin] Worker error for user={s.user_id}: {exc}")
@@ -296,6 +312,34 @@ async def auth_screen(token: str, request: Request):
     if not shot:
         raise HTTPException(202, "تصویر هنوز آماده نشده است.")
     return Response(shot, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/auth/{token}/stream")
+async def auth_stream(token: str, request: Request):
+    """Continuous MJPEG stream: frames are pushed on one connection (no per-frame polling)."""
+    user_id = resolve_user_id(request)
+    s = get_session(token, user_id)
+
+    async def frames():
+        last = None
+        while not s.finished.is_set():
+            with s.lock:
+                shot = s.screenshot
+            if shot and shot is not last:
+                last = shot
+                yield (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n"
+                    b"Content-Length: " + str(len(shot)).encode() + b"\r\n\r\n"
+                    + shot + b"\r\n"
+                )
+            await asyncio.sleep(0.04)
+
+    return StreamingResponse(
+        frames(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.post("/api/auth/{token}/input")
