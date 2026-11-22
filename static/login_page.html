@@ -12,7 +12,7 @@ main{max-width:1100px;margin:auto}
 .panel{background:#1b2733;border:1px solid #344454;border-radius:14px;padding:12px;margin-bottom:10px}
 h2{font-size:18px;margin:4px 0 8px}
 p{color:#bdc9d5;line-height:1.7;font-size:12.5px;margin:6px 0}
-#screen{display:block;width:100%;max-height:65vh;object-fit:contain;background:#080c10;border-radius:10px;touch-action:none;user-select:none;-webkit-user-drag:none}
+#screen{display:block;width:100%;max-height:70vh;object-fit:contain;background:#080c10;border-radius:10px;touch-action:none;user-select:none;-webkit-user-drag:none}
 .controls{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}
 input,select,button{font:inherit;border:0;border-radius:9px;padding:11px}
 input,select{flex:1;min-width:140px;background:#f5f7fa;color:#111}
@@ -45,11 +45,13 @@ button.done{background:#16834a;width:100%}
 <button type="button" id="type">ارسال متن</button>
 <button type="button" class="secondary" id="enter">Enter</button>
 <button type="button" class="secondary" id="refresh">تازه‌سازی</button>
+<button type="button" class="secondary" id="zoom-btn">🔍 زوم</button>
 </div>
 <div class="controls">
 <button type="button" class="done" id="complete">ثبت ورود و ذخیره نشست</button>
+<button type="button" class="done" id="next-platform" hidden>➕ ورود به پلتفرم بعدی</button>
 </div>
-<p>لمس سریع = کلیک | نگه داشتن و کشیدن = حرکت پیوسته اسلایدر/کپچا | کادر بالا = تایپ.</p>
+<p>لمس سریع = کلیک | نگه داشتن و کشیدن = حرکت پیوسته اسلایدر/کپچا | کادر بالا = تایپ | 🔍 زوم = بزرگنمایی با دو انگشت روی گوشی.</p>
 </section>
 </main>
 
@@ -81,6 +83,11 @@ if (selectEl) selectEl.value = platform;
 
 let token = null, timer = null, busy = false, fetchingFrame = false;
 let streamMode = false;
+let viewW = 1280, viewH = 800;
+let viewMode = "control";
+let zoomScale = 1, panX = 0, panY = 0;
+const zoomPointers = new Map();
+let pinchBase = null;
 let activePointerId = null;
 let downClient = null;
 let lastCoords = null;
@@ -108,13 +115,34 @@ async function api(path, body) {
     body: body ? JSON.stringify(body) : undefined
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.detail || ("خطای سرور (" + res.status + ")"));
+  if (!res.ok) {
+    const err = new Error(data.detail || ("خطای سرور (" + res.status + ")"));
+    err.status = res.status;
+    throw err;
+  }
   return data;
+}
+
+function isDeadStatus(status) {
+  return status === 404 || status === 409;
+}
+
+function markSessionDead() {
+  stopStream();
+  token = null;
+  busy = false;
+  setStatus("⛔ نشست مرورگر بسته یا منقضی شد. دوباره روی «اتصال و باز کردن مرورگر» بزنید.");
+  if (connectBtn) {
+    connectBtn.disabled = false;
+    connectBtn.textContent = "اتصال و باز کردن مرورگر";
+  }
 }
 
 async function startBrowser() {
   platform = selectEl && ALLOWED.includes(selectEl.value) ? selectEl.value : "jobinja";
   updateHeading();
+  const nextBtn = document.getElementById("next-platform");
+  if (nextBtn) nextBtn.hidden = true;
 
   stopStream();
   token = null;
@@ -132,8 +160,14 @@ async function startBrowser() {
 
   try {
     setStatus("در حال راه‌اندازی مرورگر برای " + names[platform] + "...");
-    const data = await api("/api/auth/start", { platform, user_id: queryUserId || undefined });
+    const isMobile = window.innerWidth < 700
+      || (tg && (tg.platform === "ios" || tg.platform === "android"));
+    const data = await api("/api/auth/start", {
+      platform, user_id: queryUserId || undefined, mobile: !!isMobile
+    });
     token = data.token;
+    viewW = data.width || 1280;
+    viewH = data.height || 800;
     setStatus("مرورگر آماده است. ورود و CAPTCHA را در تصویر زیر انجام دهید.");
     startStream();
   } catch (err) {
@@ -187,6 +221,7 @@ function refreshImage() {
     headers: buildHeaders()
   }).then(r => {
     if (r.status === 202) return null;
+    if (isDeadStatus(r.status)) { markSessionDead(); return null; }
     if (!r.ok) throw new Error("دریافت تصویر ناموفق بود (" + r.status + ")");
     return r.blob();
   }).then(blob => {
@@ -196,7 +231,7 @@ function refreshImage() {
     screen.src = url;
     screen.dataset.url = url;
     if (old) URL.revokeObjectURL(old);
-  }).catch(err => setStatus("خطای تصویر: " + err.message))
+  }).catch(err => { if (token) setStatus("خطای تصویر: " + err.message); })
     .finally(() => { fetchingFrame = false; });
 }
 
@@ -208,15 +243,19 @@ async function sendAction(action) {
   try {
     await api("/api/auth/" + encodeURIComponent(token) + "/input", action);
   } catch (err) {
-    setStatus("خطای ارسال فرمان: " + err.message);
+    if (err && isDeadStatus(err.status)) {
+      markSessionDead();
+    } else {
+      setStatus("خطای ارسال فرمان: " + err.message);
+    }
   }
 }
 
 function clientToBrowserCoords(clientX, clientY) {
   const r = screen.getBoundingClientRect();
   if (!r.width || !r.height) return null;
-  const x = Math.max(0, Math.min(1279, (clientX - r.left) * 1280 / r.width));
-  const y = Math.max(0, Math.min(799, (clientY - r.top) * 800 / r.height));
+  const x = Math.max(0, Math.min(viewW - 1, (clientX - r.left) * viewW / r.width));
+  const y = Math.max(0, Math.min(viewH - 1, (clientY - r.top) * viewH / r.height));
   return { x, y };
 }
 
@@ -228,8 +267,45 @@ if (selectEl) {
   });
 }
 
+function applyZoomTransform() {
+  if (!screen) return;
+  screen.style.transform = (viewMode === "zoom" && (zoomScale !== 1 || panX !== 0 || panY !== 0))
+    ? "translate(" + panX + "px," + panY + "px) scale(" + zoomScale + ")"
+    : "";
+}
+
+function resetZoom() {
+  zoomScale = 1;
+  panX = 0;
+  panY = 0;
+  applyZoomTransform();
+}
+
+document.getElementById("zoom-btn")?.addEventListener("click", () => {
+  viewMode = viewMode === "zoom" ? "control" : "zoom";
+  const b = document.getElementById("zoom-btn");
+  if (b) b.textContent = viewMode === "zoom" ? "🖐 کنترل" : "🔍 زوم";
+  if (viewMode === "control") resetZoom();
+  setStatus(viewMode === "zoom"
+    ? "حالت زوم: دو انگشت بگذار و باز کن = بزرگنمایی | با یک انگشت بکش = جابه‌جایی"
+    : "حالت کنترل: لمس = کلیک | کشیدن = حرکت ماوس");
+});
+
 if (screen) {
   screen.addEventListener("pointerdown", async e => {
+    if (viewMode === "zoom") {
+      e.preventDefault();
+      try { screen.setPointerCapture(e.pointerId); } catch (_) {}
+      zoomPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (zoomPointers.size === 2) {
+        const pts = Array.from(zoomPointers.values());
+        pinchBase = {
+          dist: Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y),
+          zoom: zoomScale
+        };
+      }
+      return;
+    }
     if (!token || activePointerId !== null) return;
     e.preventDefault();
     const pt = clientToBrowserCoords(e.clientX, e.clientY);
@@ -244,6 +320,24 @@ if (screen) {
   }, { passive: false });
 
   screen.addEventListener("pointermove", e => {
+    if (viewMode === "zoom") {
+      if (!zoomPointers.has(e.pointerId)) return;
+      e.preventDefault();
+      const prev = zoomPointers.get(e.pointerId);
+      const cur = { x: e.clientX, y: e.clientY };
+      zoomPointers.set(e.pointerId, cur);
+      if (zoomPointers.size === 1 && zoomScale > 1) {
+        panX += cur.x - prev.x;
+        panY += cur.y - prev.y;
+        applyZoomTransform();
+      } else if (zoomPointers.size === 2 && pinchBase && pinchBase.dist > 0) {
+        const pts = Array.from(zoomPointers.values());
+        const d = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+        zoomScale = Math.max(1, Math.min(5, pinchBase.zoom * d / pinchBase.dist));
+        applyZoomTransform();
+      }
+      return;
+    }
     if (activePointerId === null || e.pointerId !== activePointerId || !downClient) return;
     e.preventDefault();
     const pt = clientToBrowserCoords(e.clientX, e.clientY);
@@ -260,6 +354,11 @@ if (screen) {
   }, { passive: false });
 
   async function finishPointer(e) {
+    if (viewMode === "zoom") {
+      zoomPointers.delete(e.pointerId);
+      if (zoomPointers.size < 2) pinchBase = null;
+      return;
+    }
     if (activePointerId === null || e.pointerId !== activePointerId) return;
     e.preventDefault();
     const pt = clientToBrowserCoords(e.clientX, e.clientY) || lastCoords;
@@ -285,6 +384,11 @@ if (screen) {
 
   screen.addEventListener("wheel", e => {
     e.preventDefault();
+    if (viewMode === "zoom") {
+      zoomScale = Math.max(1, Math.min(5, zoomScale * (e.deltaY < 0 ? 1.1 : 0.9)));
+      applyZoomTransform();
+      return;
+    }
     sendAction({ type: "wheel", deltaY: e.deltaY });
   }, { passive: false });
 }
@@ -313,11 +417,23 @@ document.getElementById("complete")?.addEventListener("click", async () => {
   try {
     const data = await api("/api/auth/" + encodeURIComponent(token) + "/complete", {});
     stopStream();
-    setStatus(data.message || "نشست ذخیره شد. به ربات برگردید و Start را دوباره بزنید.");
+    setStatus(data.message || "✅ نشست ذخیره شد. می‌توانید پلتفرم بعدی را وارد کنید یا به ربات برگردید.");
+    const np = document.getElementById("next-platform");
+    if (np) np.hidden = false;
   } catch (err) {
-    setStatus("خطای ذخیره نشست: " + err.message);
-    busy = false;
+    if (err && isDeadStatus(err.status)) {
+      markSessionDead();
+    } else {
+      setStatus("خطای ذخیره نشست: " + err.message);
+      busy = false;
+    }
   }
+});
+
+document.getElementById("next-platform")?.addEventListener("click", () => {
+  const next = ALLOWED[(ALLOWED.indexOf(platform) + 1) % ALLOWED.length];
+  if (selectEl) selectEl.value = next;
+  startBrowser();
 });
 
 updateHeading();

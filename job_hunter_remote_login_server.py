@@ -103,6 +103,7 @@ def resolve_user_id(request: Request, fallback_user_id: str | None = None) -> st
 class StartBody(BaseModel):
     platform: str
     user_id: str | None = None
+    mobile: bool = False
 
 
 class InputBody(BaseModel):
@@ -128,6 +129,8 @@ class BrowserSession:
     status: str = "starting"
     thread: threading.Thread | None = None
     last_activity: float = field(default_factory=time.monotonic)
+    vw: int = 1280
+    vh: int = 800
 
 
 SESSIONS: dict[str, BrowserSession] = {}
@@ -145,12 +148,8 @@ def session_path(user_id: str, platform: str) -> Path:
     return user_dir / PLATFORMS[platform]["session"]
 
 
-def _clamp_x(val: float | None) -> float:
-    return max(0.0, min(1279.0, float(val or 0.0)))
-
-
-def _clamp_y(val: float | None) -> float:
-    return max(0.0, min(799.0, float(val or 0.0)))
+def _clamp(val: float | None, limit: float) -> float:
+    return max(0.0, min(limit, float(val or 0.0)))
 
 
 def browser_worker(s: BrowserSession):
@@ -160,7 +159,7 @@ def browser_worker(s: BrowserSession):
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             context = browser.new_context(
-                viewport={"width": 1280, "height": 800},
+                viewport={"width": s.vw, "height": s.vh},
                 device_scale_factor=1,
                 has_touch=True,
                 is_mobile=True,
@@ -195,6 +194,7 @@ def browser_worker(s: BrowserSession):
             s.ready.set()
             print(f"[RemoteLogin] Browser ready for user={s.user_id} platform={s.platform}")
 
+            max_x, max_y = s.vw - 1, s.vh - 1
             last_capture = 0.0
             while not s.finished.is_set():
                 handled = False
@@ -209,15 +209,15 @@ def browser_worker(s: BrowserSession):
                     kind = command.get("type")
                     try:
                         if kind == "mouse_down":
-                            page.mouse.move(_clamp_x(command.get("x")), _clamp_y(command.get("y")))
+                            page.mouse.move(_clamp(command.get("x"), max_x), _clamp(command.get("y"), max_y))
                             page.mouse.down()
                         elif kind == "mouse_move":
-                            page.mouse.move(_clamp_x(command.get("x")), _clamp_y(command.get("y")), steps=4)
+                            page.mouse.move(_clamp(command.get("x"), max_x), _clamp(command.get("y"), max_y), steps=4)
                         elif kind == "mouse_up":
-                            page.mouse.move(_clamp_x(command.get("x")), _clamp_y(command.get("y")), steps=3)
+                            page.mouse.move(_clamp(command.get("x"), max_x), _clamp(command.get("y"), max_y), steps=3)
                             page.mouse.up()
                         elif kind == "click":
-                            page.mouse.click(_clamp_x(command.get("x")), _clamp_y(command.get("y")))
+                            page.mouse.click(_clamp(command.get("x"), max_x), _clamp(command.get("y"), max_y))
                         elif kind == "wheel":
                             page.mouse.wheel(0, max(-1200, min(1200, float(command.get("deltaY", 0.0)))))
                         elif kind == "type":
@@ -309,6 +309,10 @@ async def start_auth(body: StartBody, request: Request):
 
     token = secrets.token_urlsafe(32)
     s = BrowserSession(token=token, user_id=user_id, platform=platform)
+    if body.mobile:
+        # Phone-sized viewport so job sites render their mobile layout,
+        # which stays readable inside the Telegram mini-app.
+        s.vw, s.vh = 412, 915
     s.thread = threading.Thread(target=browser_worker, args=(s,), daemon=True)
     with SESSIONS_LOCK:
         for old_token, old in list(SESSIONS.items()):
@@ -318,12 +322,12 @@ async def start_auth(body: StartBody, request: Request):
         SESSIONS[token] = s
     s.thread.start()
 
-    if not s.ready.wait(timeout=25):
+    if not s.ready.wait(timeout=60):
         s.finished.set()
         raise HTTPException(504, "مرورگر در زمان تعیین‌شده آماده نشد.")
     if s.error:
         raise HTTPException(500, f"اجرای مرورگر ناموفق بود: {s.error}")
-    return {"token": token, "status": s.status}
+    return {"token": token, "status": s.status, "width": s.vw, "height": s.vh}
 
 
 @app.get("/api/auth/{token}/screen")
