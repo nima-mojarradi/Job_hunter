@@ -48,6 +48,10 @@ job_hunter/
 │   ├── job_parser.py                # Job text → title / skills / technologies
 │   ├── scorer.py                    # Resume-vs-job scoring engine
 │   └── query_generator.py           # Resume → search keywords + categories
+├── static/
+│   ├── login_page.html              # Mini-app login page (remote browser)
+│   ├── login.html                   # Web login form template
+│   └── login_success.html           # Post-submit confirmation page
 ├── resumes/
 │   ├── parser.py                    # PDF → structured ResumeProfile
 │   ├── profile.py                   # Dataclasses (Experience, Education, …)

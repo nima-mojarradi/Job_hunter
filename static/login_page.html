@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<title>ورود امن به سایت کاریابی</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#101820;color:#eef2f7;font-family:Tahoma,Arial;padding:12px}
+main{max-width:1100px;margin:auto}
+.panel{background:#1b2733;border:1px solid #344454;border-radius:14px;padding:12px;margin-bottom:10px}
+h2{font-size:18px;margin:4px 0 8px}
+p{color:#bdc9d5;line-height:1.7;font-size:12.5px;margin:6px 0}
+#screen{display:block;width:100%;max-height:65vh;object-fit:contain;background:#080c10;border-radius:10px;touch-action:none;user-select:none;-webkit-user-drag:none}
+.controls{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}
+input,select,button{font:inherit;border:0;border-radius:9px;padding:11px}
+input,select{flex:1;min-width:140px;background:#f5f7fa;color:#111}
+button{background:#1686d9;color:white;font-weight:bold;cursor:pointer}
+button.secondary{background:#475569}
+button.done{background:#16834a;width:100%}
+#status{font-size:12.5px;color:#a9d8ff;min-height:22px;margin-top:6px;word-break:break-word}
+</style>
+</head>
+<body>
+<main>
+<section class="panel">
+<h2 id="heading">اتصال به حساب کاریابی</h2>
+<p>مرورگر روی سرور اجرا می‌شود. اطلاعات ورود و CAPTCHA را مستقیماً در تصویر زیر انجام دهید و پس از ورود موفق، «ثبت ورود و ذخیره نشست» را بزنید.</p>
+<div class="controls">
+<select id="platform-select" aria-label="انتخاب سایت">
+  <option value="jobinja">جابینجا</option>
+  <option value="jobvision">جاب‌ویژن</option>
+  <option value="irantalent">ایران‌تلنت</option>
+</select>
+<button type="button" id="connect-btn">اتصال و باز کردن مرورگر</button>
+</div>
+<div id="status">آماده اتصال...</div>
+</section>
+
+<section class="panel">
+<img id="screen" alt="نمای زنده مرورگر" draggable="false" />
+<div class="controls">
+<input id="text" placeholder="برای تایپ در صفحه مرورگر..." autocomplete="off">
+<button type="button" id="type">ارسال متن</button>
+<button type="button" class="secondary" id="enter">Enter</button>
+<button type="button" class="secondary" id="refresh">تازه‌سازی</button>
+</div>
+<div class="controls">
+<button type="button" class="done" id="complete">ثبت ورود و ذخیره نشست</button>
+</div>
+<p>لمس سریع = کلیک | نگه داشتن و کشیدن = حرکت پیوسته اسلایدر/کپچا | کادر بالا = تایپ.</p>
+</section>
+</main>
+
+<script>
+window.addEventListener("error", function (ev) {
+  const el = document.getElementById("status");
+  if (el) el.textContent = "خطای صفحه: " + (ev.message || "خطای نامشخص");
+});
+
+const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+try { tg?.ready(); tg?.expand(); } catch (_) {}
+
+const ALLOWED = ["jobinja", "jobvision", "irantalent"];
+const names = { jobinja: "جابینجا", jobvision: "جاب‌ویژن", irantalent: "ایران‌تلنت" };
+
+const params = new URLSearchParams(window.location.search || "");
+const urlParam = (params.get("platform") || "").trim().toLowerCase();
+const queryUserId = (params.get("user_id") || tg?.initDataUnsafe?.user?.id || "").toString().trim();
+
+let platform = ALLOWED.includes(urlParam) ? urlParam : "jobinja";
+
+const selectEl = document.getElementById("platform-select");
+const connectBtn = document.getElementById("connect-btn");
+const headingEl = document.getElementById("heading");
+const statusEl = document.getElementById("status");
+const screen = document.getElementById("screen");
+
+if (selectEl) selectEl.value = platform;
+
+let token = null, timer = null, busy = false, fetchingFrame = false;
+let activePointerId = null;
+let downClient = null;
+let lastCoords = null;
+let lastMoveSentAt = 0;
+let isDragging = false;
+
+function updateHeading() {
+  if (headingEl) headingEl.textContent = "ورود به " + (names[platform] || platform);
+}
+function setStatus(msg) {
+  if (statusEl) statusEl.textContent = msg;
+}
+
+function buildHeaders() {
+  const h = { "Content-Type": "application/json" };
+  if (tg && tg.initData) h["X-Telegram-Init-Data"] = tg.initData;
+  if (queryUserId) h["X-User-Id"] = queryUserId;
+  return h;
+}
+
+async function api(path, body) {
+  const res = await fetch(path, {
+    method: body ? "POST" : "GET",
+    headers: buildHeaders(),
+    body: body ? JSON.stringify(body) : undefined
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || ("خطای سرور (" + res.status + ")"));
+  return data;
+}
+
+async function startBrowser() {
+  platform = selectEl && ALLOWED.includes(selectEl.value) ? selectEl.value : "jobinja";
+  updateHeading();
+
+  if (timer) { clearInterval(timer); timer = null; }
+  token = null;
+  busy = false;
+  fetchingFrame = false;
+  activePointerId = null;
+  downClient = null;
+  lastCoords = null;
+  isDragging = false;
+  if (screen) screen.removeAttribute("src");
+
+  if (connectBtn) {
+    connectBtn.disabled = true;
+    connectBtn.textContent = "در حال اتصال...";
+  }
+
+  try {
+    setStatus("در حال راه‌اندازی مرورگر برای " + names[platform] + "...");
+    const data = await api("/api/auth/start", { platform, user_id: queryUserId || undefined });
+    token = data.token;
+    setStatus("مرورگر آماده است. ورود و CAPTCHA را در تصویر زیر انجام دهید.");
+    refreshImage();
+    timer = setInterval(refreshImage, 350);
+  } catch (err) {
+    setStatus("خطا: " + (err && err.message ? err.message : String(err)));
+  } finally {
+    if (connectBtn) {
+      connectBtn.disabled = false;
+      connectBtn.textContent = "اتصال و باز کردن مرورگر";
+    }
+  }
+}
+
+function refreshImage() {
+  if (!token || busy || fetchingFrame || !screen) return;
+  fetchingFrame = true;
+  fetch("/api/auth/" + encodeURIComponent(token) + "/screen?t=" + Date.now(), {
+    headers: buildHeaders()
+  }).then(r => {
+    if (r.status === 202) return null;
+    if (!r.ok) throw new Error("دریافت تصویر ناموفق بود (" + r.status + ")");
+    return r.blob();
+  }).then(blob => {
+    if (!blob) return;
+    const old = screen.dataset.url;
+    const url = URL.createObjectURL(blob);
+    screen.src = url;
+    screen.dataset.url = url;
+    if (old) URL.revokeObjectURL(old);
+  }).catch(err => setStatus("خطای تصویر: " + err.message))
+    .finally(() => { fetchingFrame = false; });
+}
+
+async function sendAction(action) {
+  if (!token) {
+    setStatus("ابتدا روی «اتصال و باز کردن مرورگر» بزنید.");
+    return;
+  }
+  try {
+    await api("/api/auth/" + encodeURIComponent(token) + "/input", action);
+  } catch (err) {
+    setStatus("خطای ارسال فرمان: " + err.message);
+  }
+}
+
+function clientToBrowserCoords(clientX, clientY) {
+  const r = screen.getBoundingClientRect();
+  if (!r.width || !r.height) return null;
+  const x = Math.max(0, Math.min(1279, (clientX - r.left) * 1280 / r.width));
+  const y = Math.max(0, Math.min(799, (clientY - r.top) * 800 / r.height));
+  return { x, y };
+}
+
+if (connectBtn) connectBtn.addEventListener("click", startBrowser);
+if (selectEl) {
+  selectEl.addEventListener("change", () => {
+    platform = ALLOWED.includes(selectEl.value) ? selectEl.value : "jobinja";
+    updateHeading();
+  });
+}
+
+if (screen) {
+  screen.addEventListener("pointerdown", async e => {
+    if (!token || activePointerId !== null) return;
+    e.preventDefault();
+    const pt = clientToBrowserCoords(e.clientX, e.clientY);
+    if (!pt) return;
+    activePointerId = e.pointerId;
+    downClient = { x: e.clientX, y: e.clientY };
+    lastCoords = pt;
+    lastMoveSentAt = performance.now();
+    isDragging = false;
+    try { screen.setPointerCapture(e.pointerId); } catch (_) {}
+    await sendAction({ type: "mouse_down", x: pt.x, y: pt.y });
+  }, { passive: false });
+
+  screen.addEventListener("pointermove", e => {
+    if (activePointerId === null || e.pointerId !== activePointerId || !downClient) return;
+    e.preventDefault();
+    const pt = clientToBrowserCoords(e.clientX, e.clientY);
+    if (!pt) return;
+    lastCoords = pt;
+    const dist = Math.hypot(e.clientX - downClient.x, e.clientY - downClient.y);
+    if (dist > 5) isDragging = true;
+
+    const now = performance.now();
+    if (isDragging && now - lastMoveSentAt >= 75) {
+      lastMoveSentAt = now;
+      sendAction({ type: "mouse_move", x: pt.x, y: pt.y });
+    }
+  }, { passive: false });
+
+  async function finishPointer(e) {
+    if (activePointerId === null || e.pointerId !== activePointerId) return;
+    e.preventDefault();
+    const pt = clientToBrowserCoords(e.clientX, e.clientY) || lastCoords;
+    const wasDrag = isDragging;
+
+    activePointerId = null;
+    downClient = null;
+    lastCoords = null;
+    isDragging = false;
+    try { screen.releasePointerCapture(e.pointerId); } catch (_) {}
+
+    if (!pt) return;
+    if (wasDrag) {
+      await sendAction({ type: "mouse_move", x: pt.x, y: pt.y });
+      await sendAction({ type: "mouse_up", x: pt.x, y: pt.y });
+      setTimeout(refreshImage, 120);
+    } else {
+      await sendAction({ type: "mouse_up", x: pt.x, y: pt.y });
+    }
+  }
+
+  screen.addEventListener("pointerup", finishPointer, { passive: false });
+  screen.addEventListener("pointercancel", finishPointer, { passive: false });
+
+  screen.addEventListener("wheel", e => {
+    e.preventDefault();
+    sendAction({ type: "wheel", deltaY: e.deltaY });
+  }, { passive: false });
+}
+
+document.getElementById("type")?.addEventListener("click", async () => {
+  const el = document.getElementById("text");
+  if (el && el.value) {
+    await sendAction({ type: "type", text: el.value });
+    el.value = "";
+  }
+});
+document.getElementById("enter")?.addEventListener("click", () => sendAction({ type: "key", key: "Enter" }));
+document.getElementById("refresh")?.addEventListener("click", refreshImage);
+
+document.getElementById("complete")?.addEventListener("click", async () => {
+  if (!token || busy) return;
+  if (!confirm("آیا ورود به حساب با موفقیت انجام شده است؟")) return;
+  busy = true;
+  setStatus("در حال ذخیره نشست...");
+  try {
+    const data = await api("/api/auth/" + encodeURIComponent(token) + "/complete", {});
+    clearInterval(timer);
+    setStatus(data.message || "نشست ذخیره شد. به ربات برگردید و Start را دوباره بزنید.");
+    if (screen) screen.removeAttribute("src");
+  } catch (err) {
+    setStatus("خطای ذخیره نشست: " + err.message);
+    busy = false;
+  }
+});
+
+updateHeading();
+if (tg && tg.initData) {
+  startBrowser();
+}
+</script>
+</body>
+</html>
