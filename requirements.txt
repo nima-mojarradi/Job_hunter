@@ -1,0 +1,9 @@
+fastapi==0.162.7
+uvicorn==0.54.0
+pydantic==2.14.3
+python-multipart==0.0.33
+playwright==1.65.2
+pyTelegramBotAPI==4.37.1
+python-dotenv==1.2.4
+pymupdf==1.28.2
+requests==2.34.2

@@ -1,0 +1,31 @@
+# --- Secrets & local config ---
+.env
+
+# --- Virtual environments ---
+env/
+env_new/
+.venv/
+venv/
+
+# --- Python caches ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# --- Runtime data (never commit) ---
+data/
+automator/sessions/
+
+# --- User resumes & platform login sessions (personal data) ---
+resumes/*
+!resumes/parser.py
+!resumes/profile.py
+!resumes/__init__.py
+*_state.json
+
+# --- Logs & OS/editor junk ---
+*.log
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
