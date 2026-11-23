@@ -170,6 +170,7 @@ Then open `http://<host>:8000/login?user_id=<telegram_user_id>`.
 | ✏️ ویرایش رزومه | Replace an existing resume with a new PDF |
 | 🗑️ حذف رزومه | Delete a saved resume |
 | 📋 مشاهده رزومه‌های من | List uploaded resumes |
+| ⬇️ دانلود رزومه | List your resumes as inline buttons; tap one to receive the PDF file in the chat |
 | 🔍 بررسی وضعیت رزومه‌ها | Sync applied-job statuses from Jobinja and list them |
 | 🔑 احراز هویت و لاگین در سایت‌ها | Open the remote-login mini-app |
 | 🚀 شروع ارسال خودکار رزومه | Start the apply loop |

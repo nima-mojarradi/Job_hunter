@@ -1,5 +1,6 @@
 import os
 import threading
+import time
 from pathlib import Path
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, MenuButtonWebApp
@@ -43,23 +44,34 @@ class TelegramHandler:
         user_dir.mkdir(parents=True, exist_ok=True)
         return user_dir
 
-    def _setup_menu_button(self):
+    def _sorted_resumes(self, user_dir: Path) -> list:
+        """لیست مرتب رزومه‌های PDF تا شماره‌گذاری دکمه‌ها همیشه پایدار بماند."""
+        return sorted(user_dir.glob("*.pdf"), key=lambda p: p.name)
+
+    def _setup_menu_button(self, attempts: int = 3, delay: float = 5.0):
         """دکمه‌ی پایین نوار تایپ تلگرام را به مینی‌اپ وصل می‌کند.
 
         آدرس مینی‌اپ (LOGIN_WEBAPP_URL) در هر بار راه‌اندازی ربات دوباره ثبت
-        می‌شود تا با آدرس تونل فعلی همیشه هم‌خوان باشد.
+        می‌شود تا با آدرس تونل فعلی همیشه هم‌خوان باشد. چون دسترسی به
+        api.telegram.org گاهی متناوب است، در صورت شکست چند بار تلاش می‌شود.
         """
         url = os.getenv("LOGIN_WEBAPP_URL", "").strip()
         if not url:
             print("[Telegram] LOGIN_WEBAPP_URL تنظیم نشده؛ دکمه مینی‌اپ ثبت نشد.")
             return
-        try:
-            self.bot.set_chat_menu_button(
-                menu_button=MenuButtonWebApp(text="ورود به سایت‌ها", web_app=WebAppInfo(url=url))
-            )
-            print("[Telegram] دکمه مینی‌اپ در نوار تایپ ثبت شد.")
-        except Exception as exc:
-            print(f"[Telegram] خطا در ثبت دکمه مینی‌اپ: {exc}")
+        menu = MenuButtonWebApp(text="ورود به سایت‌ها", web_app=WebAppInfo(url=url))
+        last_exc = None
+        for attempt in range(1, attempts + 1):
+            try:
+                self.bot.set_chat_menu_button(menu_button=menu)
+                print(f"[Telegram] دکمه مینی‌اپ در نوار تایپ ثبت شد (تلاش {attempt}).")
+                return
+            except Exception as exc:
+                last_exc = exc
+                print(f"[Telegram] ثبت دکمه مینی‌اپ (تلاش {attempt}/{attempts}) ناموفق: {exc}")
+                if attempt < attempts:
+                    time.sleep(delay)
+        print(f"[Telegram] ثبت دکمه مینی‌اپ پس از {attempts} تلاش ناموفق ماند: {last_exc}")
 
     def show_main_menu(self, chat_id: int, user_id: int):
         user_dir = self._get_user_dir(user_id)
@@ -79,6 +91,7 @@ class TelegramHandler:
             btn_edit = telebot.types.KeyboardButton("✏️ ویرایش رزومه")
             btn_delete = telebot.types.KeyboardButton("🗑️ حذف رزومه")
             btn_list = telebot.types.KeyboardButton("📋 مشاهده رزومه‌های من")
+            btn_download = telebot.types.KeyboardButton("⬇️ دانلود رزومه")
             btn_status = telebot.types.KeyboardButton("🔍 بررسی وضعیت رزومه‌ها")
             btn_login = telebot.types.KeyboardButton("🔑 احراز هویت و لاگین در سایت‌ها")
 
@@ -91,7 +104,8 @@ class TelegramHandler:
 
             markup.add(btn_add, btn_edit)
             markup.add(btn_delete, btn_list)
-            markup.add(btn_status, btn_login)
+            markup.add(btn_download, btn_status)
+            markup.add(btn_login)
             markup.add(btn_job)
 
             text = "📂 **منوی مدیریت و کنترل هوشمند رزومه‌ها**\n\nلطفاً یکی از گزینه‌های زیر را انتخاب کنید:"
@@ -188,6 +202,11 @@ class TelegramHandler:
             user_id = message.from_user.id
             chat_id = message.chat.id
             self.db.ensure_user(user_id)
+            # تازه‌سازی دکمه مینی‌اپ در پس‌زمینه تا با آدرس تونل فعلی همیشه
+            # هم‌خوان بماند (بدون معطل کردن پاسخ /start).
+            threading.Thread(
+                target=self._setup_menu_button, kwargs={"attempts": 1}, daemon=True
+            ).start()
             self.show_main_menu(chat_id, user_id)
 
         @self.bot.message_handler(
@@ -198,6 +217,7 @@ class TelegramHandler:
                 "✏️ ویرایش رزومه",
                 "🗑️ حذف رزومه",
                 "📋 مشاهده رزومه‌های من",
+                "⬇️ دانلود رزومه",
                 "🔍 بررسی وضعیت رزومه‌ها",
                 "🔑 احراز هویت و لاگین در سایت‌ها",
                 "🚀 شروع ارسال خودکار رزومه",
@@ -247,6 +267,20 @@ class TelegramHandler:
                     markup.add(InlineKeyboardButton(f"✏️ ویرایش {f.name}", callback_data=f"edit:{f.name}"))
                 self.bot.send_message(
                     chat_id, "🔄 رزومه‌ای که می‌خواهید آپدیت کنید را انتخاب کنید:", reply_markup=markup
+                )
+
+            elif text == "⬇️ دانلود رزومه":
+                files = self._sorted_resumes(user_dir)
+                if not files:
+                    self.bot.send_message(chat_id, "هیچ رزومه‌ای برای دانلود وجود ندارد.")
+                    return
+                markup = InlineKeyboardMarkup()
+                for idx, f in enumerate(files):
+                    markup.add(InlineKeyboardButton(f"⬇️ {f.name}", callback_data=f"dl:{idx}"))
+                self.bot.send_message(
+                    chat_id,
+                    "📄 روی رزومه‌ای که می‌خواهید بزنید تا فایل همین‌جا برایتان ارسال شود:",
+                    reply_markup=markup,
                 )
 
             elif text == "🔍 بررسی وضعیت رزومه‌ها":
@@ -370,6 +404,28 @@ class TelegramHandler:
                     self._show_paginated_apps(
                         chat_id, user_id, rows, page=page_num, message_id=call.message.message_id
                     )
+
+            elif data.startswith("dl:"):
+                try:
+                    idx = int(data.split(":", 1)[1])
+                except ValueError:
+                    return
+                files = self._sorted_resumes(user_dir)
+                if idx < 0 or idx >= len(files):
+                    self.bot.send_message(chat_id, "این رزومه دیگر وجود ندارد؛ لیست را دوباره باز کنید.")
+                    return
+                file_path = files[idx]
+                try:
+                    with open(file_path, "rb") as fh:
+                        self.bot.send_document(
+                            chat_id,
+                            fh,
+                            caption=f"📄 `{file_path.name}`",
+                            parse_mode="Markdown",
+                            visible_file_name=file_path.name,
+                        )
+                except Exception as exc:
+                    self.bot.send_message(chat_id, f"❌ خطا در ارسال فایل: {exc}")
 
             elif data.startswith("del:"):
                 filename = data.split(":", 1)[1]
