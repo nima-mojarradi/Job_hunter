@@ -122,9 +122,14 @@ cp .env.example .env
 | `JOB_HUNTER_SESSION_IDLE_TIMEOUT` | no | Seconds of inactivity before an open remote-login browser session is closed (default `600`) |
 
 > **Note:** quick tunnels (`*.trycloudflare.com`) get a **new URL every time
-> `cloudflared` restarts**, so buttons in old Telegram messages stop working.
-> Update `LOGIN_WEBAPP_URL`, restart the bot, and press 🔑 again to get a fresh
-> button.
+> `cloudflared` restarts**. A watchdog thread inside `run.py` keeps `cloudflared`
+> alive, verifies the new tunnel actually serves the app, updates
+> `LOGIN_WEBAPP_URL` (in `.env` and in memory) and re-registers the Telegram
+> menu button — all automatically. Buttons inside *old* Telegram messages still
+> hold the previous URL, so press 🔑 again (or restart the bot) after a tunnel
+> change to get a fresh button. The watchdog also re-registers the menu button
+> every 10 minutes so a transient network outage at startup cannot leave it
+> broken.
 
 > `.env`, `resumes/<id>/*_state.json`, PDF resumes, and `data/*.db` are all
 > git-ignored. Never commit them: session files grant full account access.
