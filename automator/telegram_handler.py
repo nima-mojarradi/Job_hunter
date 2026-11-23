@@ -2,7 +2,7 @@ import os
 import threading
 from pathlib import Path
 import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, MenuButtonWebApp
 from database import JobHunterDB
 
 
@@ -14,11 +14,14 @@ class TelegramHandler:
         self.base_resumes_dir = Path("resumes")
         self.base_resumes_dir.mkdir(parents=True, exist_ok=True)
         self.db = JobHunterDB()
+        self._user_states = {}
         self._user_active_jobs = {}
         self._user_threads = {}
         self._user_stop_events = {}
         self.start_job_callback = None
+        self.login_callback = None
         self._setup_handlers()
+        self._setup_menu_button()
 
     def send_message(self, message: str, target_chat_id: str = None, reply_markup=None):
         dest_chat = target_chat_id or self.chat_id
@@ -40,6 +43,24 @@ class TelegramHandler:
         user_dir.mkdir(parents=True, exist_ok=True)
         return user_dir
 
+    def _setup_menu_button(self):
+        """دکمه‌ی پایین نوار تایپ تلگرام را به مینی‌اپ وصل می‌کند.
+
+        آدرس مینی‌اپ (LOGIN_WEBAPP_URL) در هر بار راه‌اندازی ربات دوباره ثبت
+        می‌شود تا با آدرس تونل فعلی همیشه هم‌خوان باشد.
+        """
+        url = os.getenv("LOGIN_WEBAPP_URL", "").strip()
+        if not url:
+            print("[Telegram] LOGIN_WEBAPP_URL تنظیم نشده؛ دکمه مینی‌اپ ثبت نشد.")
+            return
+        try:
+            self.bot.set_chat_menu_button(
+                menu_button=MenuButtonWebApp(text="ورود به سایت‌ها", web_app=WebAppInfo(url=url))
+            )
+            print("[Telegram] دکمه مینی‌اپ در نوار تایپ ثبت شد.")
+        except Exception as exc:
+            print(f"[Telegram] خطا در ثبت دکمه مینی‌اپ: {exc}")
+
     def show_main_menu(self, chat_id: int, user_id: int):
         user_dir = self._get_user_dir(user_id)
         has_resumes = any(user_dir.glob("*.pdf"))
@@ -55,7 +76,10 @@ class TelegramHandler:
             )
         else:
             btn_add = telebot.types.KeyboardButton("➕ افزودن رزومه")
+            btn_edit = telebot.types.KeyboardButton("✏️ ویرایش رزومه")
+            btn_delete = telebot.types.KeyboardButton("🗑️ حذف رزومه")
             btn_list = telebot.types.KeyboardButton("📋 مشاهده رزومه‌های من")
+            btn_status = telebot.types.KeyboardButton("🔍 بررسی وضعیت رزومه‌ها")
             btn_login = telebot.types.KeyboardButton("🔑 احراز هویت و لاگین در سایت‌ها")
 
             is_running = self._user_active_jobs.get(user_id, False)
@@ -65,8 +89,9 @@ class TelegramHandler:
                 else telebot.types.KeyboardButton("🚀 شروع ارسال خودکار رزومه")
             )
 
-            markup.add(btn_add, btn_list)
-            markup.add(btn_login)
+            markup.add(btn_add, btn_edit)
+            markup.add(btn_delete, btn_list)
+            markup.add(btn_status, btn_login)
             markup.add(btn_job)
 
             text = "📂 **منوی مدیریت و کنترل هوشمند رزومه‌ها**\n\nلطفاً یکی از گزینه‌های زیر را انتخاب کنید:"
@@ -75,6 +100,62 @@ class TelegramHandler:
             self.bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
         except Exception as exc:
             print(f"[Telegram] خطا در ارسال منو: {exc}")
+
+    def _show_paginated_apps(self, chat_id, user_id, rows, page=0, message_id=None):
+        per_page = 5
+        total_pages = max(1, (len(rows) + per_page - 1) // per_page)
+        page = max(0, min(page, total_pages - 1))
+
+        chunk = rows[page * per_page: (page + 1) * per_page]
+        labels = {
+            "discovered": "پیداشده", "matched": "متناسب", "pending_approval": "در انتظار تأیید",
+            "applied": "ارسال‌شده به کارفرما", "under_review": "بررسی‌شده (دیده شده)",
+            "interview": "مصاحبه", "rejected": "ردشده", "offer": "پیشنهاد همکاری",
+            "hired": "استخدام‌شده", "withdrawn": "انصراف‌داده‌شده", "unknown": "نامشخص",
+        }
+
+        lines = []
+        for r in chunk:
+            company_name = r.get("company") or "شرکت نامشخص"
+            status_text = labels.get(r.get("status"), r.get("status"))
+            lines.append(
+                f"📌 **پوزیشن:** `{r.get('job_title')}`\n"
+                f"🏢 **شرکت:** `{company_name}`\n"
+                f"📊 **وضعیت:** `{status_text}`\n"
+                f"🔗 [لینک آگهی]({r.get('job_url')})\n"
+                f"-----------------------------------"
+            )
+
+        text_body = (
+            f"📋 **وضعیت رزومه‌های ارسالی شما (صفحه {page + 1} از {total_pages}):**\n\n"
+            + "\n".join(lines)
+        )
+
+        markup = InlineKeyboardMarkup()
+        nav_buttons = []
+        if page > 0:
+            nav_buttons.append(InlineKeyboardButton("⬅️ صفحه قبل", callback_data=f"apps_page:{page - 1}"))
+        if page < total_pages - 1:
+            nav_buttons.append(InlineKeyboardButton("صفحه بعد ➡️", callback_data=f"apps_page:{page + 1}"))
+        if nav_buttons:
+            markup.row(*nav_buttons)
+
+        try:
+            if message_id:
+                self.bot.edit_message_text(
+                    text_body, chat_id, message_id, parse_mode="Markdown",
+                    reply_markup=markup, disable_web_page_preview=True,
+                )
+            else:
+                self.bot.send_message(
+                    chat_id, text_body, parse_mode="Markdown",
+                    reply_markup=markup, disable_web_page_preview=True,
+                )
+        except Exception:
+            self.bot.send_message(
+                chat_id, text_body, parse_mode="Markdown",
+                reply_markup=markup, disable_web_page_preview=True,
+            )
 
     def _start_user_job(self, user_id: int):
         current = self._user_threads.get(user_id)
@@ -114,7 +195,10 @@ class TelegramHandler:
             in [
                 "📥 آپلود رزومه",
                 "➕ افزودن رزومه",
+                "✏️ ویرایش رزومه",
+                "🗑️ حذف رزومه",
                 "📋 مشاهده رزومه‌های من",
+                "🔍 بررسی وضعیت رزومه‌ها",
                 "🔑 احراز هویت و لاگین در سایت‌ها",
                 "🚀 شروع ارسال خودکار رزومه",
                 "🛑 توقف ارسال رزومه",
@@ -140,6 +224,49 @@ class TelegramHandler:
                 self.bot.send_message(
                     chat_id, f"📋 **لیست رزومه‌های شما:**\n\n{file_list_str}", parse_mode="Markdown"
                 )
+
+            elif text == "🗑️ حذف رزومه":
+                files = list(user_dir.glob("*.pdf"))
+                if not files:
+                    self.bot.send_message(chat_id, "رزومه‌ای برای حذف وجود ندارد.")
+                    return
+                markup = InlineKeyboardMarkup()
+                for f in files:
+                    markup.add(InlineKeyboardButton(f"❌ حذف {f.name}", callback_data=f"del:{f.name}"))
+                self.bot.send_message(
+                    chat_id, "🗑️ رزومه‌ای که می‌خواهید حذف شود را انتخاب کنید:", reply_markup=markup
+                )
+
+            elif text == "✏️ ویرایش رزومه":
+                files = list(user_dir.glob("*.pdf"))
+                if not files:
+                    self.bot.send_message(chat_id, "رزومه‌ای برای ویرایش وجود ندارد.")
+                    return
+                markup = InlineKeyboardMarkup()
+                for f in files:
+                    markup.add(InlineKeyboardButton(f"✏️ ویرایش {f.name}", callback_data=f"edit:{f.name}"))
+                self.bot.send_message(
+                    chat_id, "🔄 رزومه‌ای که می‌خواهید آپدیت کنید را انتخاب کنید:", reply_markup=markup
+                )
+
+            elif text == "🔍 بررسی وضعیت رزومه‌ها":
+                self.bot.send_message(chat_id, "🔄 در حال بررسی و همگام‌سازی وضعیت رزومه‌ها...")
+                try:
+                    from automator.jobinja_bot import JobinjaAutomator
+
+                    jobinja = JobinjaAutomator(token=self.token, chat_id=str(user_id), headless=True)
+                    try:
+                        jobinja.sync_applications_status()
+                    finally:
+                        jobinja.close()
+                except Exception as exc:
+                    print(f"[Sync Error]: {exc}")
+
+                rows = self.db.list_applications(user_id, limit=50)
+                if not rows:
+                    self.bot.send_message(chat_id, "هنوز هیچ درخواستی ثبت نشده است.")
+                else:
+                    self._show_paginated_apps(chat_id, user_id, rows, page=0)
 
             elif text == "🔑 احراز هویت و لاگین در سایت‌ها":
                 base_url = os.getenv("LOGIN_WEBAPP_URL", "").strip()
@@ -222,11 +349,63 @@ class TelegramHandler:
             elif text == "🔙 بازگشت به منو":
                 self.show_main_menu(chat_id, user_id)
 
+        @self.bot.callback_query_handler(func=lambda call: True)
+        def handle_callbacks(call):
+            user_id = call.from_user.id
+            user_dir = self._get_user_dir(user_id)
+            chat_id = call.message.chat.id
+            data = call.data or ""
+            try:
+                self.bot.answer_callback_query(call.id)
+            except Exception:
+                pass
+
+            if data.startswith("apps_page:"):
+                try:
+                    page_num = int(data.split(":", 1)[1])
+                except ValueError:
+                    return
+                rows = self.db.list_applications(user_id, limit=50)
+                if rows:
+                    self._show_paginated_apps(
+                        chat_id, user_id, rows, page=page_num, message_id=call.message.message_id
+                    )
+
+            elif data.startswith("del:"):
+                filename = data.split(":", 1)[1]
+                if Path(filename).name != filename or not filename.lower().endswith(".pdf"):
+                    self.bot.send_message(chat_id, "نام فایل نامعتبر است.")
+                    return
+                file_path = user_dir / filename
+                if file_path.exists():
+                    file_path.unlink()
+                    self.db.upsert_resume(
+                        user_id, filename, str(file_path),
+                        category=file_path.stem.lower(), is_active=False,
+                    )
+                    self.bot.send_message(
+                        chat_id, f"✅ رزومه `{filename}` با موفقیت حذف شد.", parse_mode="Markdown"
+                    )
+                self.show_main_menu(chat_id, user_id)
+
+            elif data.startswith("edit:"):
+                filename = data.split(":", 1)[1]
+                if Path(filename).name != filename or not filename.lower().endswith(".pdf"):
+                    self.bot.send_message(chat_id, "نام فایل نامعتبر است.")
+                    return
+                self._user_states[user_id] = f"waiting_for_update_resume:{filename}"
+                self.bot.send_message(
+                    chat_id,
+                    f"📥 لطفاً فایل PDF جدید را برای جایگزینی روی `{filename}` ارسال کنید:",
+                    parse_mode="Markdown",
+                )
+
         @self.bot.message_handler(content_types=["document"])
         def handle_documents(message):
             user_id = message.from_user.id
             user_dir = self._get_user_dir(user_id)
             chat_id = message.chat.id
+            state = self._user_states.get(user_id)
             file_name = Path(message.document.file_name or "resume.pdf").name
 
             if not file_name.lower().endswith(".pdf"):
@@ -236,6 +415,24 @@ class TelegramHandler:
             try:
                 file_info = self.bot.get_file(message.document.file_id)
                 downloaded_file = self.bot.download_file(file_info.file_path)
+
+                if state and state.startswith("waiting_for_update_resume:"):
+                    target_filename = state.split(":", 1)[1]
+                    destination_path = user_dir / target_filename
+                    temp_path = user_dir / f".{target_filename}.uploading"
+                    with open(temp_path, "wb") as f:
+                        f.write(downloaded_file)
+                    temp_path.replace(destination_path)
+                    self.db.upsert_resume(
+                        user_id, destination_path.name, str(destination_path),
+                        category=destination_path.stem.lower(), is_active=True,
+                    )
+                    self._user_states.pop(user_id, None)
+                    self.bot.reply_to(
+                        message, f"✅ رزومه `{target_filename}` با فایل جدید جایگزین شد."
+                    )
+                    self.show_main_menu(chat_id, user_id)
+                    return
 
                 destination_path = user_dir / file_name
                 with open(destination_path, "wb") as f:

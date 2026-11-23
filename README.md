@@ -167,10 +167,18 @@ Then open `http://<host>:8000/login?user_id=<telegram_user_id>`.
 | Button | Action |
 |---|---|
 | 📥 آپلود رزومه / ➕ افزودن رزومه | Upload a PDF resume |
+| ✏️ ویرایش رزومه | Replace an existing resume with a new PDF |
+| 🗑️ حذف رزومه | Delete a saved resume |
 | 📋 مشاهده رزومه‌های من | List uploaded resumes |
+| 🔍 بررسی وضعیت رزومه‌ها | Sync applied-job statuses from Jobinja and list them |
 | 🔑 احراز هویت و لاگین در سایت‌ها | Open the remote-login mini-app |
 | 🚀 شروع ارسال خودکار رزومه | Start the apply loop |
 | 🛑 توقف ارسال رزومه | Request a cooperative stop |
+
+The bot also registers itself as the Telegram **menu button** (the shortcut in
+the text bar) pointing at `LOGIN_WEBAPP_URL`, so the mini-app opens from there
+as well. This is re-registered on every bot start, which keeps it in sync with
+the current Cloudflare tunnel URL.
 
 ## Matching engine
 

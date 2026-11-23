@@ -19,7 +19,7 @@ input,select{flex:1;min-width:140px;background:#f5f7fa;color:#111}
 button{background:#1686d9;color:white;font-weight:bold;cursor:pointer}
 button.secondary{background:#475569}
 button.done{background:#16834a;width:100%}
-#status{font-size:12.5px;color:#a9d8ff;min-height:22px;margin-top:6px;word-break:break-word}
+#status{font-size:12.5px;color:#a9d8ff;background:#0f1a26;border:1px dashed #344454;border-radius:9px;padding:8px 10px;min-height:22px;margin-top:10px;word-break:break-word}
 </style>
 </head>
 <body>
@@ -35,7 +35,6 @@ button.done{background:#16834a;width:100%}
 </select>
 <button type="button" id="connect-btn">اتصال و باز کردن مرورگر</button>
 </div>
-<div id="status">آماده اتصال...</div>
 </section>
 
 <section class="panel">
@@ -45,13 +44,13 @@ button.done{background:#16834a;width:100%}
 <button type="button" id="type">ارسال متن</button>
 <button type="button" class="secondary" id="enter">Enter</button>
 <button type="button" class="secondary" id="refresh">تازه‌سازی</button>
-<button type="button" class="secondary" id="zoom-btn">🔍 زوم</button>
 </div>
 <div class="controls">
 <button type="button" class="done" id="complete">ثبت ورود و ذخیره نشست</button>
 <button type="button" class="done" id="next-platform" hidden>➕ ورود به پلتفرم بعدی</button>
 </div>
-<p>لمس سریع = کلیک | نگه داشتن و کشیدن = حرکت پیوسته اسلایدر/کپچا | کادر بالا = تایپ | 🔍 زوم = بزرگنمایی با دو انگشت روی گوشی.</p>
+<p>لمس سریع = کلیک | نگه داشتن و کشیدن = حرکت پیوسته اسلایدر/کپچا | کادر بالا = تایپ.</p>
+<div id="status">آماده اتصال...</div>
 </section>
 </main>
 
@@ -84,10 +83,6 @@ if (selectEl) selectEl.value = platform;
 let token = null, timer = null, busy = false, fetchingFrame = false;
 let streamMode = false;
 let viewW = 1280, viewH = 800;
-let viewMode = "control";
-let zoomScale = 1, panX = 0, panY = 0;
-const zoomPointers = new Map();
-let pinchBase = null;
 let activePointerId = null;
 let downClient = null;
 let lastCoords = null;
@@ -267,45 +262,8 @@ if (selectEl) {
   });
 }
 
-function applyZoomTransform() {
-  if (!screen) return;
-  screen.style.transform = (viewMode === "zoom" && (zoomScale !== 1 || panX !== 0 || panY !== 0))
-    ? "translate(" + panX + "px," + panY + "px) scale(" + zoomScale + ")"
-    : "";
-}
-
-function resetZoom() {
-  zoomScale = 1;
-  panX = 0;
-  panY = 0;
-  applyZoomTransform();
-}
-
-document.getElementById("zoom-btn")?.addEventListener("click", () => {
-  viewMode = viewMode === "zoom" ? "control" : "zoom";
-  const b = document.getElementById("zoom-btn");
-  if (b) b.textContent = viewMode === "zoom" ? "🖐 کنترل" : "🔍 زوم";
-  if (viewMode === "control") resetZoom();
-  setStatus(viewMode === "zoom"
-    ? "حالت زوم: دو انگشت بگذار و باز کن = بزرگنمایی | با یک انگشت بکش = جابه‌جایی"
-    : "حالت کنترل: لمس = کلیک | کشیدن = حرکت ماوس");
-});
-
 if (screen) {
   screen.addEventListener("pointerdown", async e => {
-    if (viewMode === "zoom") {
-      e.preventDefault();
-      try { screen.setPointerCapture(e.pointerId); } catch (_) {}
-      zoomPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-      if (zoomPointers.size === 2) {
-        const pts = Array.from(zoomPointers.values());
-        pinchBase = {
-          dist: Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y),
-          zoom: zoomScale
-        };
-      }
-      return;
-    }
     if (!token || activePointerId !== null) return;
     e.preventDefault();
     const pt = clientToBrowserCoords(e.clientX, e.clientY);
@@ -320,24 +278,6 @@ if (screen) {
   }, { passive: false });
 
   screen.addEventListener("pointermove", e => {
-    if (viewMode === "zoom") {
-      if (!zoomPointers.has(e.pointerId)) return;
-      e.preventDefault();
-      const prev = zoomPointers.get(e.pointerId);
-      const cur = { x: e.clientX, y: e.clientY };
-      zoomPointers.set(e.pointerId, cur);
-      if (zoomPointers.size === 1 && zoomScale > 1) {
-        panX += cur.x - prev.x;
-        panY += cur.y - prev.y;
-        applyZoomTransform();
-      } else if (zoomPointers.size === 2 && pinchBase && pinchBase.dist > 0) {
-        const pts = Array.from(zoomPointers.values());
-        const d = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
-        zoomScale = Math.max(1, Math.min(5, pinchBase.zoom * d / pinchBase.dist));
-        applyZoomTransform();
-      }
-      return;
-    }
     if (activePointerId === null || e.pointerId !== activePointerId || !downClient) return;
     e.preventDefault();
     const pt = clientToBrowserCoords(e.clientX, e.clientY);
@@ -354,11 +294,6 @@ if (screen) {
   }, { passive: false });
 
   async function finishPointer(e) {
-    if (viewMode === "zoom") {
-      zoomPointers.delete(e.pointerId);
-      if (zoomPointers.size < 2) pinchBase = null;
-      return;
-    }
     if (activePointerId === null || e.pointerId !== activePointerId) return;
     e.preventDefault();
     const pt = clientToBrowserCoords(e.clientX, e.clientY) || lastCoords;
@@ -384,11 +319,6 @@ if (screen) {
 
   screen.addEventListener("wheel", e => {
     e.preventDefault();
-    if (viewMode === "zoom") {
-      zoomScale = Math.max(1, Math.min(5, zoomScale * (e.deltaY < 0 ? 1.1 : 0.9)));
-      applyZoomTransform();
-      return;
-    }
     sendAction({ type: "wheel", deltaY: e.deltaY });
   }, { passive: false });
 }
