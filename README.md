@@ -116,20 +116,27 @@ cp .env.example .env
 | Variable | Required | Description |
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | yes | Bot token from @BotFather |
-| `LOGIN_WEBAPP_URL` | for login button | Base URL of the remote-login mini-app, e.g. `https://xxxx.trycloudflare.com/login` |
+| `LOGIN_WEBAPP_URL` | for login button | Base URL of the remote-login mini-app, e.g. `https://xxxx.trycloudflare.com/login` (the watchdog maintains it for you) |
 | `JOB_HUNTER_SESSION_DIR` | no | Where user session files live (default `resumes`) |
 | `TELEGRAM_INIT_DATA_MAX_AGE` | no | Max age in seconds for Telegram Mini-App init data (default `86400`) |
 | `JOB_HUNTER_SESSION_IDLE_TIMEOUT` | no | Seconds of inactivity before an open remote-login browser session is closed (default `600`) |
+| `NGROK_AUTHTOKEN` | no | ngrok free authtoken — enables ngrok as the tunnel provider |
+| `NGROK_DOMAIN` | no | Reserved ngrok static domain (e.g. `myapp.ngrok-free.app`) so the URL never changes |
+| `SERVEO_ENABLED` | no | Set `0` to disable the serveo provider (default `1`) |
+| `SERVEO_SUBDOMAIN` | no | Fixed serveo subdomain (default `jobhunter-miniapp` → `https://jobhunter-miniapp.serveo.net`) |
 
-> **Note:** quick tunnels (`*.trycloudflare.com`) get a **new URL every time
-> `cloudflared` restarts**. A watchdog thread inside `run.py` keeps `cloudflared`
-> alive, verifies the new tunnel actually serves the app, updates
-> `LOGIN_WEBAPP_URL` (in `.env` and in memory) and re-registers the Telegram
-> menu button — all automatically. Buttons inside *old* Telegram messages still
-> hold the previous URL, so press 🔑 again (or restart the bot) after a tunnel
-> change to get a fresh button. The watchdog also re-registers the menu button
-> every 10 minutes so a transient network outage at startup cannot leave it
-> broken.
+> **Note — tunnels:** a watchdog thread inside `run.py` picks the first
+> provider that works, in this order: **ngrok** (only if `NGROK_AUTHTOKEN` is
+> set) → **serveo** (default; SSH reverse tunnel, no signup, no VPN, stable
+> `*.serveo.net` URL) → **cloudflared** quick tunnel. It keeps the tunnel
+> alive, *verifies the URL actually serves the mini-app before publishing it*,
+> updates `LOGIN_WEBAPP_URL` (in `.env` and in memory) and re-registers the
+> Telegram menu button — all automatically. If a provider keeps failing it is
+> put on a 5-minute cooldown and the next one is tried. Buttons inside *old*
+> Telegram messages still hold the previous URL, so press 🔑 again after a
+> tunnel change to get a fresh button. The watchdog also re-registers the menu
+> button every 10 minutes so a transient network outage at startup cannot
+> leave it broken.
 
 > `.env`, `resumes/<id>/*_state.json`, PDF resumes, and `data/*.db` are all
 > git-ignored. Never commit them: session files grant full account access.
@@ -156,7 +163,8 @@ python main.py
 uvicorn job_hunter_remote_login_server:app --host 0.0.0.0 --port 8000
 ```
 
-Expose it publicly (e.g. with a Cloudflare tunnel) and put that URL in
+Expose it publicly (e.g. with the built-in tunnel watchdog in `run.py`, which
+picks serveo/ngrok/cloudflare automatically) and put that URL in
 `LOGIN_WEBAPP_URL`.
 
 **Simple HTML login form** (alternative to the mini-app):
@@ -183,8 +191,8 @@ Then open `http://<host>:8000/login?user_id=<telegram_user_id>`.
 
 The bot also registers itself as the Telegram **menu button** (the shortcut in
 the text bar) pointing at `LOGIN_WEBAPP_URL`, so the mini-app opens from there
-as well. This is re-registered on every bot start, which keeps it in sync with
-the current Cloudflare tunnel URL.
+as well. This is re-registered on every bot start and every 10 minutes by the
+watchdog, which keeps it in sync with the current tunnel URL.
 
 ## Matching engine
 
