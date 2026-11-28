@@ -123,18 +123,26 @@ cp .env.example .env
 | `NGROK_AUTHTOKEN` | no | ngrok free authtoken — enables ngrok as the tunnel provider |
 | `NGROK_DOMAIN` | no | Reserved ngrok static domain (e.g. `myapp.ngrok-free.app`) so the URL never changes |
 | `SERVEO_ENABLED` | no | Set `0` to disable the serveo provider (default `1`) |
-| `SERVEO_SUBDOMAIN` | no | Fixed serveo subdomain (default `jobhunter-miniapp` → `https://jobhunter-miniapp.serveo.net`) |
+| `SERVEO_SUBDOMAIN` | no | Optional serveo subdomain (ignored unless an SSH key is registered in the Serveo Console) |
 
 > **Note — tunnels:** a watchdog thread inside `run.py` picks the first
 > provider that works, in this order: **ngrok** (only if `NGROK_AUTHTOKEN` is
-> set) → **serveo** (default; SSH reverse tunnel, no signup, no VPN, stable
-> `*.serveo.net` URL) → **cloudflared** quick tunnel. It keeps the tunnel
-> alive, *verifies the URL actually serves the mini-app before publishing it*,
-> updates `LOGIN_WEBAPP_URL` (in `.env` and in memory) and re-registers the
-> Telegram menu button — all automatically. If a provider keeps failing it is
-> put on a 5-minute cooldown and the next one is tried. Buttons inside *old*
-> Telegram messages still hold the previous URL, so press 🔑 again after a
-> tunnel change to get a fresh button. The watchdog also re-registers the menu
+> set) → **serveo** (default; SSH reverse tunnel, no signup, no VPN) →
+> **cloudflared** quick tunnel (needs `argotunnel.com`, blocked without a VPN).
+> The watchdog keeps the tunnel alive, **verifies the response actually comes
+> from the app** (a `/health` body check — serveo's warning/landing pages also
+> return HTTP 200, so a status code alone is not enough), updates
+> `LOGIN_WEBAPP_URL` (in `.env` and in memory) and re-registers the Telegram
+> menu button — all automatically. If a provider keeps failing it is put on a
+> 5-minute cooldown and the next one is tried.
+>
+> **Serveo specifics:** anonymous sessions get a random
+> `https://xxxx.serveousercontent.com` URL that changes whenever the tunnel
+> reconnects (the watchdog republishes it). Browsers hitting the URL for the
+> first time see a one-time *"Serveo Browser Warning"* page; **Continue to
+> Site** keeps the URL fragment, so Telegram Mini-App `tgWebAppData` survives.
+> Buttons inside *old* Telegram messages still hold the previous URL, so press
+> 🔑 again after a tunnel change. The watchdog also re-registers the menu
 > button every 10 minutes so a transient network outage at startup cannot
 > leave it broken.
 

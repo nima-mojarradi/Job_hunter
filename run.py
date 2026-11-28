@@ -129,6 +129,14 @@ def _full_login_url(base: str) -> str:
     return base if base.endswith("/login") else base + "/login"
 
 
+def _base_url(url: str) -> str:
+    """پایه‌ی تونل بدون مسیر /login (برای کالبک‌های دیگر مثل /health)."""
+    url = (url or "").strip().rstrip("/")
+    if url.endswith("/login"):
+        url = url[: -len("/login")]
+    return url
+
+
 def _publish_tunnel_url(url: str) -> None:
     """آدرس جدید تونل را در .env و محیط فعلی پروسه ثبت می‌کند."""
     url = _full_login_url(url)
@@ -149,16 +157,20 @@ def _publish_tunnel_url(url: str) -> None:
 
 
 def _verify_tunnel(url: str, timeout: float = 60.0) -> bool:
-    """تا تونل واقعاً صفحه لاگین را سرو نکند True برنمی‌گرداند.
+    """تا پاسخِ واقعاً از سرور خودمان باشد True برنمی‌گرداند.
 
-    از انتشار آدرسِ تونلی که هنوز برپا نشده (یا شبکه قطع است) جلوگیری می‌کند.
+    فقط کد 200 کافی نیست: صفحه‌ی هشدار/تبلیغاتی serveo هم 200 برمی‌گرداند.
+    برای همین /health را می‌خوانیم و نشانه‌ی سرویس خودمان را چک می‌کنیم
+    (قبلاً آدرسِ مرده یا صفحه‌ی بیگانه روی دکمه مینی‌اپ ثبت می‌شد).
     """
-    probe = _full_login_url(url) + "?user_id=watchdog"
+    probe = _base_url(url) + "/health"
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            with urllib.request.urlopen(probe, timeout=10) as resp:
-                if getattr(resp, "status", 200) == 200:
+            req = urllib.request.Request(probe, headers={"Accept": "*/*"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                body = resp.read(512).decode("utf-8", "ignore")
+                if getattr(resp, "status", 200) == 200 and "job-hunter-remote-login" in body:
                     return True
         except Exception:
             pass
@@ -239,43 +251,48 @@ def _start_ngrok():
 
 
 def _start_serveo():
-    """serveo (SSH reverse-forward، بدون ثبت‌نام) → (proc, url).
+    """serveo (SSH reverse-forward، بدون ثبت‌نام و بدون VPN) → (proc, url).
 
-    زیردامنه با SERVEO_SUBDOMAIN ثابت می‌ماند؛ اگر اشغال بود، شکست خورده
-    ثبت می‌شود و در تلاش بعدی زیردامنه تصادفی امتحان می‌شود.
+    نکات مهم (نتیجه‌ی تست واقعی):
+    - آدرس واقعی باید از خروجی ssh خوانده شود: کاربر بدون حساب، هر بار
+      آدرس تصادفی روی *.serveousercontent.com می‌گیرد (نه *.serveo.net که
+      حالا فقط صفحه‌ی تبلیغاتی serveo است). زیردامنه‌ی دلخواه فقط با کلید
+      SSH ثبت‌شده در کنسول serveo کار می‌کند.
+    - مقصد باید 127.0.0.1 صریح باشد: localhost روی ویندوز ممکن است ::1
+      (IPv6) برگرداند و چون uvicorn فقط IPv4 گوش می‌دهد، نتیجه 502 می‌شود.
+    - نباید -N زد: بدون آن serveo آدرس را چاپ نمی‌کند.
+    - نباید BatchMode زد: serveo احراز keyboard-interactive می‌خواهد و
+      با BatchMode پیام Permission denied می‌گیریم.
     """
     ssh = shutil.which("ssh")
     if not ssh:
         return None, None
-    sub = os.getenv("SERVEO_SUBDOMAIN", "jobhunter-miniapp").strip()
-    if not sub:
-        sub = "jobhunter-miniapp"
-    # اگر زیردامنه‌ی ثابت یک‌بار شکست خورده باشد، تصادفی امتحان می‌شود
-    if getattr(_start_serveo, "_fallback", False):
-        sub = f"jobhunter-{int(time.time()) % 100000}"
+    sub = os.getenv("SERVEO_SUBDOMAIN", "").strip()
+    remote = f"{sub}:80:127.0.0.1:8000" if sub else "80:127.0.0.1:8000"
     cmd = [
         ssh,
-        "-R", f"{sub}:80:localhost:8000",
+        "-R", remote,
         "-o", "StrictHostKeyChecking=accept-new",
-        # توجه: BatchMode اینجا مضر است — serveo احراز keyboard-interactive
-        # می‌خواهد و با BatchMode رد می‌شود (Permission denied).
         "-o", "ExitOnForwardFailure=yes",
         "-o", "ServerAliveInterval=25",
         "-o", "ServerAliveCountMax=3",
         "-o", "ConnectTimeout=15",
-        "-N",
         "serveo.net",
     ]
     proc = _detached_popen(cmd, TUNNEL_OUT_LOG, TUNNEL_ERR_LOG)
-    # صبر کن تا یا فوروارد برپا شود یا ssh به‌خاطر اشغال بودن زیردامنه بمیرد.
-    # (ExitOnForwardFailure باعث می‌شود اشغال بودن زیردامنه سریع ssh را بکشد.)
-    for _ in range(8):
-        time.sleep(2)
+    deadline = time.time() + 30
+    while time.time() < deadline:
         if proc.poll() is not None:
-            _start_serveo._fallback = True
-            return None, None
-    _start_serveo._fallback = False
-    return proc, f"https://{sub}.serveo.net"
+            return None, None  # ssh زودتر مرد (مثلاً خطای احراز)
+        try:
+            out = TUNNEL_OUT_LOG.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            out = ""
+        m = re.search(r"Forwarding HTTP traffic from (https://\S+)", out)
+        if m:
+            return proc, m.group(1).strip()
+        time.sleep(2)
+    return proc, None  # آدرس خوانده نشد؛ نگهبان پروسه را می‌کشد
 
 
 def _start_provider(name: str):
